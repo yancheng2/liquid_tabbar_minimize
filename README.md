@@ -18,6 +18,7 @@ A polished Flutter bottom bar with scroll-to-minimize, native iOS 26+ support, a
 - Animated pill indicator with adaptive tab widths so long labels stay readable
 - Scroll-to-minimize with tunable threshold and start offset (or disable entirely)
 - Configurable colors, height, label visibility, and optional action button
+- Badge support via `itemCounts` (auto formats `99+`)
 - SF Symbol mapping for native bar
 - RTL aware: auto mirrors layout/semantics in both native and custom bars
 - RTL-native animation/spacing: action pill and collapse direction swap correctly when RTL is active
@@ -62,6 +63,7 @@ LiquidBottomNavigationBar(
       label: 'Settings',
     ),
   ],
+  itemCounts: [3, 0, 128], // 对应每个 tab 的 badge
   showActionButton: true,
   actionButton: ActionButtonConfig(const Icon(Icons.add), 'plus'),
   onActionTap: () => debugPrint('Action tapped'),
@@ -162,6 +164,7 @@ LiquidBottomNavigationBar(
     LiquidTabItem(widget: Icon(Icons.star), sfSymbol: 'star.fill', label: 'Favorites'),
     LiquidTabItem(widget: Icon(Icons.settings), sfSymbol: 'gearshape.fill', label: 'Settings'),
   ],
+  itemCounts: [1, 0, 23, 105], // 105 会显示为 99+
   showActionButton: true,
   // Option 1: Widget + SF Symbol
   actionButton: ActionButtonConfig(const Icon(Icons.search), 'magnifyingglass'),
@@ -187,6 +190,7 @@ LiquidBottomNavigationBar(
 |-----------|------|---------|-------------|
 | `currentIndex` | `int` | required | Currently selected tab index |
 | `items` | `List<LiquidTabItem>` | required | Tab items with widget, sfSymbol, and label |
+| `itemCounts` | `List<int>?` | null | Badge counts for each tab (`<=0` hide, `1..99` show number, `>=100` show `99+`) |
 | `onTap` | `ValueChanged<int>?` | null | Tab selection callback |
 | `showActionButton` | `bool` | false | Show optional action button |
 | `actionButton` | `ActionButtonConfig?` | null | Action button config - `ActionButtonConfig(Widget, sfSymbol)` or `.asset(path)` |
@@ -196,11 +200,17 @@ LiquidBottomNavigationBar(
 | `height` | `double` | 68 | Tab bar height |
 | `bottomOffset` | `double` | 0 | Lift bar above home indicator |
 | `labelVisibility` | `LabelVisibility` | always | Label display mode |
-| `sfSymbolMapper` | `Function?` | null | Map IconData to SF Symbols (native) |
 | `collapseStartOffset` | `double` | 20.0 | Pixels before minimize applies (0 = immediate) |
 | `animationDuration` | `Duration` | 250ms | Animation duration for minimize/expand |
 | `forceCustomBar` | `bool` | false | Force custom bar on iOS 26+ |
 | `enableMinimize` | `bool` | true | Keep bar expanded if false |
+
+## Badge (`itemCounts`)
+`itemCounts` 会按 `items` 下标一一对应：
+
+- `null` 或 `<= 0`：不显示 badge
+- `1..99`：显示数字
+- `>= 100`：显示 `99+`
 
 ## Label Visibility
 ```dart
@@ -210,7 +220,7 @@ Supported in both custom and native bars.
 
 ## iOS Native (26+)
 - Native minimize behavior and blur
-- SF Symbols support via `sfSymbolMapper`
+- SF Symbols support via `LiquidTabItem.sfSymbol`
 - Honors `labelVisibility`, colors, action button, minimize toggles
 
 ## Compatibility

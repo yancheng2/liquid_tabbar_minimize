@@ -1,3 +1,14 @@
+# Unreleased
+* **iOS 26+ Stability**: Reworked native state sync to follow `creationParams + MethodChannel incremental updates` pattern.
+  * Added lightweight native sync for `selectedIndex` and `badges` without recreating platform view.
+  * Reduced transition flicker by keeping platform view mounted while hiding with opacity.
+* **Selection Semantics Fix**: `onTap` now follows confirmed selection semantics on iOS 26+.
+  * Native callback moved from `shouldSelect` path to confirmed `didSelect`.
+  * Fixed long-press cancel path causing incorrect `0 -> target` visual animation.
+* **Badge Support**: Enabled `itemCounts` as badge data source.
+  * `<= 0` hides badge, `1..99` shows number, `>= 100` shows `99+`.
+  * Works for both native iOS 26+ tab bar and custom bar (iOS < 26 / Android).
+
 # 1.0.9
 * **BREAKING**: `LiquidTabItem` replaces `BottomNavigationBarItem` - each item now has `widget`, `sfSymbol`, and `label`
 * **BREAKING**: `sfSymbolMapper` parameter removed - SF Symbol is now part of `LiquidTabItem`

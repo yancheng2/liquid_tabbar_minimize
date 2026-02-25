@@ -77,6 +77,8 @@ class SwiftUITabBarPlatformView: NSObject, FlutterPlatformView, UITabBarControll
     private var isRtl: Bool = false
 
     private var originalTabBarItems: [UITabBarItem]?
+    private var currentBadges: [String] = []
+    private var suppressSelectionCallback = false
     
     // MARK: - Singleton Pattern for Widget Recreation Fix
     private static var sharedInstance: SwiftUITabBarPlatformView?
@@ -126,6 +128,24 @@ class SwiftUITabBarPlatformView: NSObject, FlutterPlatformView, UITabBarControll
                 }
                 self?.updateTabLabels(labels: labels)
                 result(nil)
+
+            case "setBadges":
+                guard let args = call.arguments as? [String: Any],
+                      let badges = args["badges"] as? [String] else {
+                    result(FlutterMethodNotImplemented)
+                    return
+                }
+                self?.updateBadges(badges: badges)
+                result(nil)
+
+            case "setSelectedIndex":
+                guard let args = call.arguments as? [String: Any],
+                      let indexValue = args["index"] as? NSNumber else {
+                    result(FlutterMethodNotImplemented)
+                    return
+                }
+                self?.updateSelectedIndex(index: indexValue.intValue)
+                result(nil)
                 
             case "updateActionImage":
                 guard let args = call.arguments as? [String: Any],
@@ -164,6 +184,7 @@ class SwiftUITabBarPlatformView: NSObject, FlutterPlatformView, UITabBarControll
 
     private func setupTabBar(args: Any?) {
         let items = Self.parseItems(args: args)
+        let badges = Self.parseBadges(args: args)
         let includeAction = Self.parseActionFlag(args: args)
         let actionSymbol = Self.parseActionSymbol(args: args)
         let actionImageBytes = Self.parseActionImageBytes(args: args)
@@ -180,6 +201,7 @@ class SwiftUITabBarPlatformView: NSObject, FlutterPlatformView, UITabBarControll
         selectedTintColor = selectedColor
         unselectedTintColor = unselectedColor
         let initialIndex = (args as? [String: Any])?["initialIndex"] as? Int ?? 0
+        currentBadges = badges
         actionButtonSize = max(64, UITabBar().sizeThatFits(.zero).height)
         let pillWidth = includeAction ? (actionButtonSize + 20) : 0
         if includeAction {
@@ -225,6 +247,12 @@ class SwiftUITabBarPlatformView: NSObject, FlutterPlatformView, UITabBarControll
             default:
                 tabItem.setTitleTextAttributes([.foregroundColor: unselectedColor], for: .normal)
                 tabItem.setTitleTextAttributes([.foregroundColor: selectedColor], for: .selected)
+            }
+            if item.id < badges.count {
+                let badgeValue = badges[item.id].trimmingCharacters(in: .whitespacesAndNewlines)
+                tabItem.badgeValue = badgeValue.isEmpty ? nil : badgeValue
+            } else {
+                tabItem.badgeValue = nil
             }
             vc.tabBarItem = tabItem
             return vc
@@ -444,6 +472,8 @@ class SwiftUITabBarPlatformView: NSObject, FlutterPlatformView, UITabBarControll
         self.originalItemSpacing = tabController.tabBar.itemSpacing
         self.originalItemPositioningRaw = tabController.tabBar.itemPositioning.rawValue
         self.originalTabBarItems = tabController.tabBar.items
+        applyCurrentBadgesToOriginalControllers()
+        applyCurrentBadgesToVisibleItems()
     }
 
     func view() -> UIView { container }
@@ -498,8 +528,10 @@ class SwiftUITabBarPlatformView: NSObject, FlutterPlatformView, UITabBarControll
         if let list = originalViewControllers, let tag = currentTag,
            let selIndex = list.firstIndex(where: { $0.tabBarItem.tag == tag }) {
             let selectedVC = list[selIndex]
+            suppressSelectionCallback = true
             tbc.setViewControllers([selectedVC], animated: false)
             tbc.selectedIndex = 0
+            suppressSelectionCallback = false
         }
 
         // Shrink tab bar inside the same wrapper
@@ -569,18 +601,6 @@ class SwiftUITabBarPlatformView: NSObject, FlutterPlatformView, UITabBarControll
             self.container.layoutIfNeeded()
         }, completion: { _ in
             self.isTransitioning = false
-                // After animation finishes, force re-selection/layout
-            if let vcs = tbc.viewControllers {
-                let savedIdx = tbc.selectedIndex
-                let savedDelegate = tbc.delegate
-                tbc.delegate = nil
-                for i in 0..<vcs.count {
-                    tbc.selectedIndex = i
-                }
-                tbc.selectedIndex = savedIdx
-                tbc.delegate = savedDelegate
-            }
-
             DispatchQueue.main.async {
                 tbc.tabBar.itemPositioning = .automatic
                 tbc.tabBar.itemWidth = 0
@@ -603,45 +623,20 @@ class SwiftUITabBarPlatformView: NSObject, FlutterPlatformView, UITabBarControll
         tabViewLeading?.isActive = true
         tabViewTrailing?.isActive = true
 
-        // Restore all VCs if they were collapsed
-        if let original = originalViewControllers, tbc.viewControllers?.count == 1 {
-            tbc.setViewControllers([], animated: false)
-            tbc.setViewControllers(original, animated: false)
-        }
-
-        if let tag = savedSelectedTag, let list = tbc.viewControllers,
-           let idx = list.firstIndex(where: { $0.tabBarItem.tag == tag }) {
-            tbc.selectedIndex = idx
-        }
-
-        tbc.tabBar.itemPositioning = .automatic
-        tbc.tabBar.itemWidth = 0
-        tbc.tabBar.itemSpacing = 0
-
-        wrapper.setNeedsLayout()
-        container.setNeedsLayout()
-        tbc.tabBar.setNeedsLayout()
-        tbc.tabBar.layoutIfNeeded()
-        // Restore expanded insets
-        if let leadExp = expandedLeading, let trailExp = expandedTrailing,
-           let leadCol = collapsedLeading, let trailCol = collapsedTrailing {
-            NSLayoutConstraint.deactivate([leadCol, trailCol])
-            NSLayoutConstraint.activate(baseConstraints + [leadExp, trailExp])
-        }
-
-        // Re-apply full width to the wrapper
-        tabViewCollapsedWidth?.isActive = false
-        tabViewTrailing?.isActive = true
-
         // Restore all VCs (full reset by clearing then re-adding)
         if let original = originalViewControllers {
+            suppressSelectionCallback = true
             tbc.setViewControllers([], animated: false)
             tbc.setViewControllers(original, animated: false)
+            suppressSelectionCallback = false
         }
 
-        if let tag = savedSelectedTag, let list = tbc.viewControllers,
+        if let tag = savedSelectedTag,
+           let list = tbc.viewControllers,
            let idx = list.firstIndex(where: { $0.tabBarItem.tag == tag }) {
+            suppressSelectionCallback = true
             tbc.selectedIndex = idx
+            suppressSelectionCallback = false
         }
 
         // Return positioning to automatic
@@ -651,6 +646,7 @@ class SwiftUITabBarPlatformView: NSObject, FlutterPlatformView, UITabBarControll
 
         // Restore appearance (make titles visible again)
         restoreAppearance(on: tbc.tabBar)
+        applyCurrentBadgesToVisibleItems()
 
         // Safety: reset title positions/text
         tbc.tabBar.items?.forEach { item in
@@ -664,36 +660,10 @@ class SwiftUITabBarPlatformView: NSObject, FlutterPlatformView, UITabBarControll
         tbc.tabBar.setNeedsUpdateConstraints()
         tbc.tabBar.setNeedsLayout()
         tbc.tabBar.layoutIfNeeded()
+        wrapper.setNeedsLayout()
+        wrapper.layoutIfNeeded()
         container.setNeedsLayout()
-
-        // Animate expansion visuals first
-        UIView.animate(withDuration: animationDuration, delay: 0, options: [.curveEaseIn], animations: {
-            tbc.tabBar.layer.cornerRadius = 24
-            tbc.tabBar.alpha = 1.0
-            tbc.tabBar.layoutIfNeeded()
-            self.container.layoutIfNeeded()
-        }, completion: { _ in
-            self.isTransitioning = false
-                // After animation finishes, force re-selection/layout
-            if let vcs = tbc.viewControllers {
-                let savedIdx = tbc.selectedIndex
-                let savedDelegate = tbc.delegate
-                tbc.delegate = nil
-                for i in 0..<vcs.count {
-                    tbc.selectedIndex = i
-                }
-                tbc.selectedIndex = savedIdx
-                tbc.delegate = savedDelegate
-            }
-
-            DispatchQueue.main.async {
-                tbc.tabBar.itemPositioning = .automatic
-                tbc.tabBar.itemWidth = 0
-                tbc.tabBar.itemSpacing = 0
-                tbc.tabBar.setNeedsLayout()
-                tbc.tabBar.layoutIfNeeded()
-            }
-        })
+        container.layoutIfNeeded()
     }
 
     @objc private func handleCollapsedTap() {
@@ -785,7 +755,6 @@ class SwiftUITabBarPlatformView: NSObject, FlutterPlatformView, UITabBarControll
 
     // Mirror tab selections back to Flutter
     func tabBarController(_ tabBarController: UITabBarController, shouldSelect viewController: UIViewController) -> Bool {
-        let tag = viewController.tabBarItem.tag
         // Briefly ignore scroll-triggered minimize after selection
         ignoreScrollUntil = Date().addingTimeInterval(1.2)
         expandedLockUntil = Date().addingTimeInterval(1.2)
@@ -801,8 +770,15 @@ class SwiftUITabBarPlatformView: NSObject, FlutterPlatformView, UITabBarControll
         }
         // Any normal tab tap should clear action pill selection state.
         actionTabBar?.selectedItem = nil
-        eventChannel.invokeMethod("onTabChanged", arguments: tag)
         return true
+    }
+
+    func tabBarController(_ tabBarController: UITabBarController, didSelect viewController: UIViewController) {
+        if suppressSelectionCallback { return }
+        let tag = viewController.tabBarItem.tag
+        if tag >= 0 {
+            eventChannel.invokeMethod("onTabChanged", arguments: tag)
+        }
     }
 
     func tabBar(_ tabBar: UITabBar, didSelect item: UITabBarItem) {
@@ -826,17 +802,85 @@ class SwiftUITabBarPlatformView: NSObject, FlutterPlatformView, UITabBarControll
     // MARK: - Dynamic Label Update
     
     private func updateTabLabels(labels: [String]) {
-        guard let items = tabBarController?.tabBar.items else { return }
-        
-        // Update all tab items with received labels
-        for (index, label) in labels.enumerated() {
-            if index < items.count {
-                let item = items[index]
+        if let original = originalViewControllers {
+            for (index, label) in labels.enumerated() where index < original.count {
+                guard let item = original[index].tabBarItem else { continue }
                 item.title = label
-                // Also update the saved titles so they don't revert on minimize/expand
                 originalTitlesByTag[item.tag] = label
             }
         }
+
+        guard let items = tabBarController?.tabBar.items else { return }
+        for item in items {
+            let index = item.tag
+            if index >= 0 && index < labels.count {
+                item.title = labels[index]
+                originalTitlesByTag[item.tag] = labels[index]
+            }
+        }
+    }
+
+    private func normalizedBadgeValue(_ value: String?) -> String? {
+        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        return raw
+    }
+
+    private func applyCurrentBadgesToOriginalControllers() {
+        guard let original = originalViewControllers else { return }
+        for (index, viewController) in original.enumerated() {
+            let badge = index < currentBadges.count ? currentBadges[index] : nil
+            viewController.tabBarItem.badgeValue = normalizedBadgeValue(badge)
+        }
+    }
+
+    private func applyCurrentBadgesToVisibleItems() {
+        guard let visibleItems = tabBarController?.tabBar.items else { return }
+        for item in visibleItems {
+            let index = item.tag
+            if index >= 0 && index < currentBadges.count {
+                item.badgeValue = normalizedBadgeValue(currentBadges[index])
+            } else {
+                item.badgeValue = nil
+            }
+        }
+    }
+
+    private func updateBadges(badges: [String]) {
+        currentBadges = badges
+        applyCurrentBadgesToOriginalControllers()
+        applyCurrentBadgesToVisibleItems()
+    }
+
+    private func updateSelectedIndex(index: Int) {
+        guard let tbc = tabBarController,
+              let original = originalViewControllers,
+              index >= 0,
+              index < original.count else { return }
+        savedSelectedTag = original[index].tabBarItem.tag
+
+        if isMinimized {
+            suppressSelectionCallback = true
+            tbc.setViewControllers([original[index]], animated: false)
+            tbc.selectedIndex = 0
+            suppressSelectionCallback = false
+        } else {
+            if tbc.viewControllers?.count != original.count {
+                suppressSelectionCallback = true
+                tbc.setViewControllers([], animated: false)
+                tbc.setViewControllers(original, animated: false)
+                suppressSelectionCallback = false
+            }
+            if let currentViewControllers = tbc.viewControllers,
+               index < currentViewControllers.count {
+                suppressSelectionCallback = true
+                tbc.selectedIndex = index
+                suppressSelectionCallback = false
+            }
+        }
+        actionTabBar?.selectedItem = nil
     }
     
     // MARK: - Dynamic Image Updates
@@ -917,6 +961,14 @@ class SwiftUITabBarPlatformView: NSObject, FlutterPlatformView, UITabBarControll
             return true
         }
         return flag
+    }
+
+    static func parseBadges(args: Any?) -> [String] {
+        guard let dict = args as? [String: Any],
+              let badges = dict["badges"] as? [String] else {
+            return []
+        }
+        return badges
     }
 
     static func parseSelectedColor(args: Any?) -> UIColor {

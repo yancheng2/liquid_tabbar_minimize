@@ -8,6 +8,28 @@ import 'liquid_route_observer.dart';
 /// Label visibility mode
 enum LabelVisibility { selectedOnly, always, never }
 
+String _formatBadgeCount(int? count) {
+  if (count == null || count <= 0) return '';
+  if (count >= 100) return '99+';
+  return '$count';
+}
+
+List<String> _buildBadgeStringsFromCounts(List<int>? counts, int itemLength) {
+  final safeCounts = counts ?? const <int>[];
+  return List<String>.generate(itemLength, (index) {
+    if (index >= safeCounts.length) return '';
+    return _formatBadgeCount(safeCounts[index]);
+  });
+}
+
+bool _stringListEquals(List<String> a, List<String> b) {
+  if (a.length != b.length) return false;
+  for (int i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
 /// Configuration for the action button
 ///
 /// Use the main constructor for Widget + SF Symbol:
@@ -187,6 +209,9 @@ class _LiquidBottomNavigationBarState extends State<LiquidBottomNavigationBar>
   int? _currentViewId; // Track the current native view ID
   late int _instanceId; // Unique ID for hot restart support
   Uint8List? _loadedAssetBytes; // Cached asset bytes for action button
+  int? _lastSyncedIndex;
+  List<String>? _lastSyncedLabels;
+  List<String>? _lastSyncedBadges;
 
   @override
   void initState() {
@@ -268,28 +293,44 @@ class _LiquidBottomNavigationBarState extends State<LiquidBottomNavigationBar>
   @override
   void didUpdateWidget(covariant LiquidBottomNavigationBar oldWidget) {
     super.didUpdateWidget(oldWidget);
-
-    // Update native labels when locale changes (only if native view is ready)
-    if (_useNative && _scrollChannel != null && _currentViewId != null) {
-      final oldLabels = oldWidget.items.map((e) => e.label).toList();
-      final newLabels = widget.items.map((e) => e.label).toList();
-
-      if (!_listEquals(oldLabels, newLabels)) {
-        _scrollChannel!
-            .invokeMethod('updateLabels', {'labels': newLabels})
-            .catchError((error) {
-              // Silently ignore - native view may have been recreated
-            });
-      }
-    }
+    _syncNativePropsIfNeeded();
   }
 
-  bool _listEquals(List<String> a, List<String> b) {
-    if (a.length != b.length) return false;
-    for (int i = 0; i < a.length; i++) {
-      if (a[i] != b[i]) return false;
+  List<String> _buildBadgeStrings() {
+    return _buildBadgeStringsFromCounts(widget.itemCounts, widget.items.length);
+  }
+
+  Future<void> _syncNativePropsIfNeeded() async {
+    if (!_useNative || _scrollChannel == null || _currentViewId == null) return;
+    final channel = _scrollChannel!;
+    final labels = widget.items.map((e) => e.label).toList(growable: false);
+    final badges = _buildBadgeStrings();
+    final selectedIndex = widget.currentIndex;
+
+    try {
+      if (_lastSyncedLabels == null ||
+          !_stringListEquals(_lastSyncedLabels!, labels)) {
+        await channel.invokeMethod('updateLabels', {'labels': labels});
+        _lastSyncedLabels = List<String>.from(labels);
+      }
+
+      if (_lastSyncedBadges == null ||
+          !_stringListEquals(_lastSyncedBadges!, badges)) {
+        await channel.invokeMethod('setBadges', {'badges': badges});
+        _lastSyncedBadges = List<String>.from(badges);
+      }
+
+      if (selectedIndex >= 0 &&
+          selectedIndex < widget.items.length &&
+          selectedIndex != _lastSyncedIndex) {
+        await channel.invokeMethod('setSelectedIndex', {
+          'index': selectedIndex,
+        });
+        _lastSyncedIndex = selectedIndex;
+      }
+    } catch (_) {
+      // 视图重建窗口期可能抛错，这里忽略即可。
     }
-    return true;
   }
 
   @override
@@ -315,14 +356,13 @@ class _LiquidBottomNavigationBarState extends State<LiquidBottomNavigationBar>
       animation: Listenable.merge([primaryAnim, secondaryAnim]),
       builder: (context, child) {
         final shouldHide = _shouldHideForRoute(route);
-        // Use Visibility to hide bar instead of removing from tree
-        // This preserves native UiKitView state during navigation
-        return Visibility(
-          visible: !shouldHide,
-          maintainState: true,
-          maintainAnimation: true,
-          maintainSize: false,
-          child: _buildBar(context),
+        // 保持节点挂载，仅调整透明度，避免平台视图在转场时闪烁。
+        return IgnorePointer(
+          ignoring: shouldHide,
+          child: Opacity(
+            opacity: shouldHide ? 0 : 1,
+            child: _buildBar(context),
+          ),
         );
       },
     );
@@ -333,8 +373,14 @@ class _LiquidBottomNavigationBarState extends State<LiquidBottomNavigationBar>
 
     if (!_isTopRoute) return true;
     if (!route.isCurrent) return true;
-    if ((route.animation?.value ?? 1) < 1) return true;
-    if ((route.secondaryAnimation?.value ?? 0) > 0.01) return true;
+    final primary = route.animation;
+    final secondary = route.secondaryAnimation;
+    if (primary != null && primary.status != AnimationStatus.completed) {
+      return true;
+    }
+    if (secondary != null && secondary.status != AnimationStatus.dismissed) {
+      return true;
+    }
     return false;
   }
 
@@ -349,6 +395,7 @@ class _LiquidBottomNavigationBarState extends State<LiquidBottomNavigationBar>
         currentIndex: widget.currentIndex,
         onTap: widget.onTap,
         items: widget.items,
+        itemCounts: widget.itemCounts,
         showActionButton: widget.showActionButton,
         actionButton: widget.actionButton,
         onActionTap: widget.onActionTap,
@@ -425,6 +472,16 @@ class _LiquidBottomNavigationBarState extends State<LiquidBottomNavigationBar>
                     );
                     _setupEventChannel(_instanceId);
                     LiquidBottomNavigationBar._nativeState = this;
+                    _lastSyncedLabels = widget.items
+                        .map((e) => e.label)
+                        .toList(growable: false);
+                    _lastSyncedBadges = _buildBadgeStrings();
+                    _lastSyncedIndex =
+                        widget.currentIndex >= 0 &&
+                            widget.currentIndex < widget.items.length
+                        ? widget.currentIndex
+                        : null;
+                    _syncNativePropsIfNeeded();
                   },
                   creationParams: {
                     'instanceId': _instanceId,
@@ -434,6 +491,7 @@ class _LiquidBottomNavigationBarState extends State<LiquidBottomNavigationBar>
                         .map((e) => e.selectedSfSymbol ?? e.sfSymbol)
                         .toList(),
                     'initialIndex': widget.currentIndex,
+                    'badges': _buildBadgeStrings(),
                     'enableActionTab': widget.showActionButton,
                     'actionSymbol': actionSFSymbol,
                     'actionImageBytes': actionImageBytes,
@@ -461,6 +519,7 @@ class _LiquidBottomNavigationBarState extends State<LiquidBottomNavigationBar>
       currentIndex: widget.currentIndex,
       onTap: widget.onTap,
       items: widget.items,
+      itemCounts: widget.itemCounts,
       showActionButton: widget.showActionButton,
       actionButton: widget.actionButton,
       onActionTap: widget.onActionTap,
@@ -526,6 +585,7 @@ class _CustomLiquidBar extends StatefulWidget {
   final int currentIndex;
   final ValueChanged<int>? onTap;
   final List<LiquidTabItem> items;
+  final List<int>? itemCounts;
   final bool showActionButton;
   final ActionButtonConfig? actionButton;
   final VoidCallback? onActionTap;
@@ -543,6 +603,7 @@ class _CustomLiquidBar extends StatefulWidget {
   const _CustomLiquidBar({
     required this.currentIndex,
     required this.items,
+    this.itemCounts,
     this.onTap,
     required this.showActionButton,
     this.actionButton,
@@ -679,6 +740,54 @@ class _CustomLiquidBarState extends State<_CustomLiquidBar> {
     return isSelected ? (item.selectedWidget ?? item.widget) : item.widget;
   }
 
+  int get _effectiveTabIndex {
+    if (widget.items.isEmpty) return 0;
+    return widget.currentIndex.clamp(0, widget.items.length - 1).toInt();
+  }
+
+  Widget _buildBadgeWidget(String text) {
+    return Container(
+      constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+      padding: EdgeInsets.symmetric(horizontal: text.length > 1 ? 4 : 0),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFF3B30),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.white, width: 1),
+      ),
+      child: Center(
+        child: Text(
+          text,
+          maxLines: 1,
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+            height: 1,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTabIconWithBadge({
+    required int index,
+    required LiquidTabItem item,
+    required Color tintColor,
+    required bool isSelected,
+    required String badgeText,
+  }) {
+    return Stack(
+      clipBehavior: Clip.none,
+      alignment: Alignment.center,
+      children: [
+        _buildTabItemWidget(index, item, tintColor, isSelected: isSelected),
+        if (badgeText.isNotEmpty)
+          Positioned(right: -8, top: -6, child: _buildBadgeWidget(badgeText)),
+      ],
+    );
+  }
+
   void handleScroll(double offset, double delta) {
     if (!widget.enableMinimize) return;
     if (DateTime.now().isBefore(_ignoreScrollUntil)) return;
@@ -739,6 +848,11 @@ class _CustomLiquidBarState extends State<_CustomLiquidBar> {
         (isDark
             ? Colors.white.withValues(alpha: 0.6)
             : Colors.black.withValues(alpha: 0.5));
+    final badgeTexts = _buildBadgeStringsFromCounts(
+      widget.itemCounts,
+      widget.items.length,
+    );
+    final selectedTabIndex = _effectiveTabIndex;
     final isActionSelected =
         widget.showActionButton && widget.currentIndex >= widget.items.length;
     final bool isRtl = widget.isRtl;
@@ -793,15 +907,18 @@ class _CustomLiquidBarState extends State<_CustomLiquidBar> {
                       ),
                       child: _isCollapsed
                           ? _buildCollapsedTab(
-                              widget.currentIndex,
+                              selectedTabIndex,
                               selectedColor,
                               unselectedColor,
                               isDark,
+                              badgeTexts[selectedTabIndex],
                             )
                           : _buildExpandedTabBar(
                               isDark,
                               selectedColor,
                               unselectedColor,
+                              badgeTexts,
+                              selectedTabIndex,
                             ),
                     ),
                   ),
@@ -878,12 +995,14 @@ class _CustomLiquidBarState extends State<_CustomLiquidBar> {
     bool isDark,
     Color selectedColor,
     Color unselectedColor,
+    List<String> badgeTexts,
+    int selectedTabIndex,
   ) {
     // Her item için flex hesapla
     List<int> flexValues = [];
     for (int i = 0; i < widget.items.length; i++) {
       final item = widget.items[i];
-      final isSelected = widget.currentIndex == i;
+      final isSelected = selectedTabIndex == i;
       final showLabel = _shouldShowLabel(isSelected);
       final int labelLength = item.label.length;
       final int extraFlex = showLabel ? (labelLength > 6 ? 2 : 1) : 0;
@@ -905,10 +1024,10 @@ class _CustomLiquidBarState extends State<_CustomLiquidBar> {
 
           for (int i = 0; i < widget.items.length; i++) {
             final itemWidth = (availableWidth * flexValues[i]) / totalFlex;
-            if (i < widget.currentIndex) {
+            if (i < selectedTabIndex) {
               selectedLeft += itemWidth;
             }
-            if (i == widget.currentIndex) {
+            if (i == selectedTabIndex) {
               selectedWidth = itemWidth;
             }
           }
@@ -959,7 +1078,7 @@ class _CustomLiquidBarState extends State<_CustomLiquidBar> {
                 child: Row(
                   children: List.generate(widget.items.length, (index) {
                     final item = widget.items[index];
-                    final isSelected = widget.currentIndex == index;
+                    final isSelected = selectedTabIndex == index;
                     final showLabel = _shouldShowLabel(isSelected);
 
                     return Expanded(
@@ -994,13 +1113,14 @@ class _CustomLiquidBarState extends State<_CustomLiquidBar> {
                                         ? selectedColor
                                         : unselectedColor,
                                   ),
-                                  child: _buildTabItemWidget(
-                                    index,
-                                    item,
-                                    isSelected
+                                  child: _buildTabIconWithBadge(
+                                    index: index,
+                                    item: item,
+                                    tintColor: isSelected
                                         ? selectedColor
                                         : unselectedColor,
                                     isSelected: isSelected,
+                                    badgeText: badgeTexts[index],
                                   ),
                                 ),
                               ),
@@ -1046,6 +1166,7 @@ class _CustomLiquidBarState extends State<_CustomLiquidBar> {
     Color selectedColor,
     Color unselectedColor,
     bool isDark,
+    String badgeText,
   ) {
     final item = widget.items[currentIndex];
     return GestureDetector(
@@ -1086,11 +1207,12 @@ class _CustomLiquidBarState extends State<_CustomLiquidBar> {
         child: Center(
           child: IconTheme(
             data: IconThemeData(size: 26, color: selectedColor),
-            child: _buildTabItemWidget(
-              widget.currentIndex,
-              item,
-              selectedColor,
+            child: _buildTabIconWithBadge(
+              index: currentIndex,
+              item: item,
+              tintColor: selectedColor,
               isSelected: true,
+              badgeText: badgeText,
             ),
           ),
         ),
